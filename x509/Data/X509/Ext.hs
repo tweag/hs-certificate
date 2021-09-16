@@ -271,8 +271,34 @@ instance Extension ExtCrlDistributionPoints where
     extOID _ = [2,5,29,31]
     extHasNestedASN1 = const True
     extEncode = error "extEncode ExtCrlDistributionPoints unimplemented"
-    extDecode = error "extDecode ExtCrlDistributionPoints unimplemented"
-    --extEncode (ExtCrlDistributionPoints )
+    extDecode = runParseASN1 parsePoints
+      where
+        -- CRLDistributionPoints in https://datatracker.ietf.org/doc/html/rfc3280.html#section-4.2.1.14
+        parsePoints :: ParseASN1 ExtCrlDistributionPoints
+        parsePoints = ExtCrlDistributionPoints <$> onNextContainer Sequence (getMany parsePoint)
+
+        -- DistributionPoint in https://datatracker.ietf.org/doc/html/rfc3280.html#section-4.2.1.14
+        parsePoint :: ParseASN1 DistributionPoint
+        parsePoint = do
+          onNextContainer Sequence $ do
+            mpointName <- onNextContainerMaybe (Container Context 0) parsePointName
+            -- TODO: There's other fields reasons and cRLIssuer we are ignoring here
+            case mpointName of
+              -- FIXME: The spec allows this to be optional, but our types can't represent a non-existant value
+              Nothing -> throwParseError "No distributionPoint found"
+              Just pointName -> return pointName
+
+        -- DistributionPointName in https://datatracker.ietf.org/doc/html/rfc3280.html#section-4.2.1.14
+        parsePointName :: ParseASN1 DistributionPoint
+        parsePointName = do
+          mname <-
+            -- FIXME: The standard specifies that this should be GeneralNames, which would be done with parseGeneralNames
+            -- But in an actual certificate it's not a sequence but only a single element. Why?
+            onNextContainerMaybe (Container Context 0) (DistributionPointFullName . (:[]) <$> getSimpleAddr)
+            <|> onNextContainerMaybe (Container Context 1) (DistributionNameRelative <$> getObject)
+          case mname of
+            Nothing -> throwParseError "Neither fullName nor nameRelativeToCRLIssuer choice found"
+            Just name -> return name
 
 parseGeneralNames :: ParseASN1 [AltName]
 parseGeneralNames = onNextContainer Sequence $ getMany getAddr
@@ -304,14 +330,15 @@ parseGeneralNames = onNextContainer Sequence $ getMany getAddr
                 OID unknown -> throwParseError ("GeneralNames: unknown OID " ++ show unknown)
                 _           -> throwParseError ("GeneralNames: expecting OID but got " ++ show n)
 
-        getSimpleAddr = do
-            n <- getNext
-            case n of
-                (Other Context 1 b) -> return $ AltNameRFC822 $ BC.unpack b
-                (Other Context 2 b) -> return $ AltNameDNS $ BC.unpack b
-                (Other Context 6 b) -> return $ AltNameURI $ BC.unpack b
-                (Other Context 7 b) -> return $ AltNameIP  b
-                _                   -> throwParseError ("GeneralNames: not coping with unknown stream " ++ show n)
+getSimpleAddr :: ParseASN1 AltName
+getSimpleAddr = do
+    n <- getNext
+    case n of
+        (Other Context 1 b) -> return $ AltNameRFC822 $ BC.unpack b
+        (Other Context 2 b) -> return $ AltNameDNS $ BC.unpack b
+        (Other Context 6 b) -> return $ AltNameURI $ BC.unpack b
+        (Other Context 7 b) -> return $ AltNameIP  b
+        _                   -> throwParseError ("GeneralNames: not coping with unknown stream " ++ show n)
 
 encodeGeneralNames :: [AltName] -> [ASN1]
 encodeGeneralNames names =
